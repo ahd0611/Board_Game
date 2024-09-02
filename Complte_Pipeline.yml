@@ -1,0 +1,101 @@
+stages:          # List of stages for jobs, and their order of execution
+  - install_tools
+  - test
+  - security
+  - build
+  - image_push
+  - deploy
+
+install_required_tools:       # This job runs in the build stage, which runs first.
+  stage: install_tools
+  script:
+    - sudo apt install -y openjdk-17-jre-headless
+    - sudo apt install -y maven
+    - sudo apt-get install docker.io -y
+    - sudo usermod -aG docker ubuntu  
+    - newgrp docker
+    - sudo chmod 777 /var/run/docker.sock
+    - sudo apt-get install wget apt-transport-https gnupg lsb-release
+    - wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+    - echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+    - sudo apt-get update -y
+    - sudo apt-get install trivy -y
+    - sudo snap install kubectl --classic
+  tags:
+    - ahd0611
+
+unit_testing:       # This job runs in the build stage, which runs first.
+  stage: test
+  script:
+     - mvn test
+  tags:
+    - ahd0611   
+
+trivy_fs_scan:       # This job runs in the build stage, which runs first.
+  stage: security
+  script:
+     - trivy fs --format table -o fs.html .
+  tags:
+    - ahd0611  
+
+sonarqube-check:
+  stage: security
+  image: 
+    name: sonarsource/sonar-scanner-cli:latest
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script: 
+    - sonar-scanner
+  allow_failure: true
+  only:
+    - main
+
+image_build_&_scan:
+ stage: build
+ variables:
+    Image_tag: $CI_REGISTRY/ahd_devops/board_game/board-game:$CI_PIPELINE_ID
+ script:
+  - mvn clean package
+  - docker build -t $Image_tag .
+  - trivy image $Image_tag --format table -o image.html
+ tags :
+  - ahd0611
+ artifacts:
+   paths:
+     - image.html
+ only:
+   - main
+
+image_push:
+ stage: image_push
+ variables:
+   Image_tag: $CI_REGISTRY/ahd_devops/board_game/board-game:$CI_PIPELINE_ID
+ before_script:
+   - docker login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+ script:
+   - docker push $Image_tag
+ tags :
+ - ahd0611
+ only:
+  - main
+
+k8s-deploy:
+ stage: deploy
+ variables :
+    KUBE_CONTEXT: ahd_devops/Board_Game/:eks-k8s
+ image:
+   name: bitnami/kubectl:latest
+   entrypoint: ['']
+ before_script:
+ - kubectl config use-context "$KUBE_CONTEXT"
+ script:
+  -  envsubst < path/to/deployment-service.yaml.template > path/to/deployment-service.yaml
+  -  kubectl apply -f deployment-service.yaml
+ only:
+  - main
+ when: manual
